@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { trace, SpanStatusCode, context, SpanKind, type Span } from '@opentelemetry/api';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -368,6 +369,24 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // Map of tool_use_id → open span, closed when the tool_result arrives
+  const pendingToolSpans = new Map<string, Span>();
+
+  // ── OpenTelemetry: root span for this agent session ──────────────────────
+  const tracer   = trace.getTracer('nanoclaw-agent-runner', '1.0.0');
+  const rootSpan = tracer.startSpan('agent.session', {
+    kind: SpanKind.INTERNAL,
+    attributes: {
+      'openinference.span.kind': 'CHAIN',
+      'session.id':              sessionId ?? '',
+      'input.value':             prompt.slice(0, 2000),
+      'nanoclaw.group':          containerInput.groupFolder,
+      'llm.model_name':          process.env.ANTHROPIC_MODEL ?? 'unknown',
+    },
+  });
+  const spanCtx = trace.setSpan(context.active(), rootSpan);
+  // ─────────────────────────────────────────────────────────────────────────
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
@@ -391,74 +410,167 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
-      allowedTools: [
-        'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
-        'Task', 'TaskOutput', 'TaskStop',
-        'TeamCreate', 'TeamDelete', 'SendMessage',
-        'TodoWrite', 'ToolSearch', 'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*'
-      ],
-      env: sdkEnv,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+  try {
+    for await (const message of context.with(spanCtx, () => query({
+      prompt: stream,
+      options: {
+        cwd: '/workspace/group',
+        additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+        resume: sessionId,
+        resumeSessionAt: resumeAt,
+        systemPrompt: globalClaudeMd
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+          : undefined,
+        allowedTools: [
+          'Bash',
+          'Read', 'Write', 'Edit', 'Glob', 'Grep',
+          'WebSearch', 'WebFetch',
+          'Task', 'TaskOutput', 'TaskStop',
+          'TeamCreate', 'TeamDelete', 'SendMessage',
+          'TodoWrite', 'ToolSearch', 'Skill',
+          'NotebookEdit',
+          'mcp__nanoclaw__*'
+        ],
+        env: sdkEnv,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        settingSources: ['project', 'user'],
+        mcpServers: {
+          nanoclaw: {
+            command: 'node',
+            args: [mcpServerPath],
+            env: {
+              NANOCLAW_CHAT_JID: containerInput.chatJid,
+              NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+              NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            },
           },
         },
-      },
-      hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-      },
-    }
-  })) {
-    messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+        hooks: {
+          PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        },
+      }
+    }))) {
+      messageCount++;
+      const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+      log(`[msg #${messageCount}] type=${msgType}`);
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
+      if (message.type === 'assistant' && 'uuid' in message) {
+        lastAssistantUuid = (message as { uuid: string }).uuid;
+
+        const content = (message as { message?: { content?: unknown[] } }).message?.content;
+        if (Array.isArray(content)) {
+          // ── Collect assistant text ─────────────────────────────────────
+          const textBlocks = content
+            .filter((b: unknown) => (b as { type?: string }).type === 'text')
+            .map((b: unknown) => (b as { text?: string }).text ?? '')
+            .join('');
+
+          // ── Tool-use spans: one child span per tool call block ─────────
+          for (const block of content) {
+            const b = block as { type?: string; id?: string; name?: string; input?: unknown };
+            if (b.type === 'tool_use' && b.name) {
+              const toolSpan = tracer.startSpan(
+                `tool.${b.name}`,
+                {
+                  kind: SpanKind.INTERNAL,
+                  attributes: {
+                    'openinference.span.kind': 'TOOL',
+                    'tool.name':               b.name,
+                    'tool.id':                 b.id ?? '',
+                    'input.value':             JSON.stringify(b.input ?? {}).slice(0, 4000),
+                  },
+                },
+                spanCtx,
+              );
+              // Store span so we can set output.value when the tool result arrives
+              pendingToolSpans.set(b.id ?? '', toolSpan);
+            }
+          }
+
+          // ── Assistant-turn span: captures the LLM's reasoning text ─────
+          if (textBlocks) {
+            const turnSpan = tracer.startSpan(
+              'llm.turn',
+              {
+                kind: SpanKind.INTERNAL,
+                attributes: {
+                  'openinference.span.kind': 'LLM',
+                  'output.value':            textBlocks.slice(0, 4000),
+                  'llm.model_name':          process.env.ANTHROPIC_MODEL ?? 'unknown',
+                },
+              },
+              spanCtx,
+            );
+            turnSpan.setStatus({ code: SpanStatusCode.OK });
+            turnSpan.end();
+          }
+          // ─────────────────────────────────────────────────────────────
+        }
+      }
+
+      // ── Close tool spans when their results arrive ────────────────────
+      if (message.type === 'user') {
+        const userContent = (message as { message?: { content?: unknown[] } }).message?.content;
+        if (Array.isArray(userContent)) {
+          for (const block of userContent) {
+            const b = block as { type?: string; tool_use_id?: string; content?: unknown };
+            if (b.type === 'tool_result' && b.tool_use_id) {
+              const span = pendingToolSpans.get(b.tool_use_id);
+              if (span) {
+                const output = typeof b.content === 'string'
+                  ? b.content
+                  : JSON.stringify(b.content ?? '');
+                span.setAttribute('output.value', output.slice(0, 4000));
+                span.setStatus({ code: SpanStatusCode.OK });
+                span.end();
+                pendingToolSpans.delete(b.tool_use_id);
+              }
+            }
+          }
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────
+
+      if (message.type === 'system' && message.subtype === 'init') {
+        newSessionId = message.session_id;
+        rootSpan.setAttribute('session.id', newSessionId);
+        log(`Session initialized: ${newSessionId}`);
+      }
+
+      if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+        const tn = message as { task_id: string; status: string; summary: string };
+        log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+      }
+
+      if (message.type === 'result') {
+        resultCount++;
+        const textResult = 'result' in message ? (message as { result?: string }).result : null;
+        log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+        if (textResult) {
+          rootSpan.setAttribute('output.value', textResult.slice(0, 2000));
+        }
+        writeOutput({
+          status: 'success',
+          result: textResult || null,
+          newSessionId
+        });
+      }
     }
 
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
+    rootSpan.setStatus({ code: SpanStatusCode.OK });
+  } catch (err) {
+    rootSpan.recordException(err as Error);
+    rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+    throw err;
+  } finally {
+    // Close any tool spans that never received a result
+    for (const span of pendingToolSpans.values()) {
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
     }
-
-    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-      const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
-    }
-
-    if (message.type === 'result') {
-      resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId
-      });
-    }
+    pendingToolSpans.clear();
+    rootSpan.end();
   }
 
   ipcPolling = false;
