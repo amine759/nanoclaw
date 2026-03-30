@@ -1,0 +1,10 @@
+{
+  "name": "wazuh-mock-mcp",
+  "version": "1.0.0",
+  "description": "Mock Wazuh MCP server for local development — no real Wazuh infrastructure required",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {}
+}

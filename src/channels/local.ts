@@ -198,6 +198,9 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 registerChannel('local', (opts: ChannelOpts) => {
-  const port = parseInt(process.env.LOCAL_HTTP_PORT ?? String(DEFAULT_PORT), 10);
+  const port = parseInt(
+    process.env.LOCAL_HTTP_PORT ?? String(DEFAULT_PORT),
+    10,
+  );
   return new LocalHttpChannel(opts, port);
 });
