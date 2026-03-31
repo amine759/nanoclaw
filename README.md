@@ -23,6 +23,58 @@
 
 NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Claude agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
 
+## Wazuh SOC Autopilot — Quick Start
+
+> Running the analyst-in-the-loop SOC agent with the mock Wazuh MCP server.
+
+**Terminal 1 — Mock MCP** (keep running):
+```bash
+cd ~/Documents/amine759/naoris/AI-PoCs/threat-detection/wazuh-nanoclaw-autopilot
+bash nanoclaw/mock-mcp/run.sh
+```
+
+**Terminal 2 — Start NanoClaw:**
+```bash
+systemctl --user start nanoclaw
+```
+
+**Terminal 3 — Watch agent responses** (keep open):
+```bash
+curl -N "http://127.0.0.1:3001/chat/stream?jid=local:wazuh_soc"
+```
+
+**Terminal 4 — Watch container logs** (keep open):
+```bash
+bash nanoclaw/scripts/nanoclaw-watcher.sh
+```
+
+**Terminal 5 — Send an investigation:**
+```bash
+# Alert summary
+curl -s -X POST http://127.0.0.1:3001/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"jid":"local:wazuh_soc","text":"give me a summary of high severity alerts"}'
+
+# Scenario 1 — SSH brute force → lateral movement  [Wazuh AR path]
+curl -s -X POST http://127.0.0.1:3001/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"jid":"local:wazuh_soc","text":"investigate the 203.0.113.44 attack chain"}'
+
+# Scenario 2 — malware on prod-app-01              [Wazuh AR path]
+curl -s -X POST http://127.0.0.1:3001/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"jid":"local:wazuh_soc","text":"investigate the malware on prod-app-01"}'
+
+# Scenario 4 — backdoor SSH key + credential exfil [mixed: Wazuh AR + custom script]
+curl -s -X POST http://127.0.0.1:3001/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"jid":"local:wazuh_soc","text":"investigate the backdoor activity on prod-web-01 from 203.0.113.77"}'
+```
+
+The POST returns immediately. Watch Terminal 3 for the agent response (20–60s).
+
+---
+
 ## Quick Start
 
 ```bash
