@@ -302,6 +302,23 @@ Risk levels: 0-3 low, 4-6 medium, 7-8 high, 9-10 critical.
 2. Evidence collection before eradication — capture state before killing processes
 3. Least privilege first — block_ip before isolate_host, isolate_host before disable_user
 
+**Routing Decision — for each planned action, pick an execution path:**
+
+| Condition | Path |
+|---|---|
+| Action maps 1:1 to a Wazuh AR tool (block_ip, isolate_host, kill_process, disable_user, quarantine_file, firewall_drop, host_deny) | **Wazuh fast path** |
+| Action requires custom logic or multiple steps | **Custom script path** |
+| No matching Wazuh AR command exists | **Custom script path** |
+| Target host has no Wazuh agent installed | **Custom script path** |
+| Action targets app-layer (API keys, config files, database records) | **Custom script path** |
+
+For any action on the **custom script path**, before presenting to the analyst:
+1. Write action script to `/workspace/group/scripts/CASE-{id}-{action}.sh` (or `.ps1` for Windows)
+2. Write rollback script to `/workspace/group/scripts/CASE-{id}-{action}-rollback.sh`
+3. Syntax-check: `bash -n /workspace/group/scripts/CASE-{id}-{action}.sh`
+4. Dry-run where safe (use `--dry-run`, `--check`, `-n` flags or echo-only substitutions)
+5. Capture dry-run output — include it in the report
+
 ### Step 5: Present Findings
 
 After investigation, present a structured report to the analyst:
@@ -332,8 +349,20 @@ Evidence:
 - {key finding 2}
 
 Recommended Actions:
-1. {action} — {target} (risk: {level}, confidence: {score})
-2. {action} — {target} (risk: {level}, confidence: {score})
+1. {action} — {target} (risk: {level}, confidence: {score}, path: wazuh_ar | custom_script)
+2. {action} — {target} (risk: {level}, confidence: {score}, path: wazuh_ar | custom_script)
+
+--- Custom Script Actions (if any) ---
+Action:   {description of what the script does}
+Script:   /workspace/group/scripts/CASE-{id}-{action}.sh
+Rollback: /workspace/group/scripts/CASE-{id}-{action}-rollback.sh
+
+```sh
+{script content}
+```
+
+Dry-run output:
+{output}
 
 Reply "approve" to execute recommended actions, or ask questions.
 ```
@@ -361,6 +390,7 @@ Read the full policy at `/workspace/extra/policies/policy.yaml`. These rules are
 | kill_process | YES | medium | 0.8 | 2 items | 5 min |
 | disable_user | YES | high | 0.9 | 5 items | 30 min |
 | quarantine_file | YES | low | 0.7 | 2 items | 5 min |
+| custom_script | YES | high | 0.8 | 3 items | 10 min |
 | active_response | NO | high | 0.9 | 5 items | 30 min |
 | firewall_drop | YES | medium | 0.7 | 2 items | 5 min |
 | host_deny | YES | medium | 0.8 | 3 items | 10 min |
@@ -413,28 +443,51 @@ Before executing any action, verify the target isn't already in the desired stat
 
 Only after the analyst explicitly approves (says "approve", "yes", "go ahead"):
 
-### Pre-Execution
+### Pre-Execution (both paths)
 1. Re-read the case file to confirm state hasn't changed
 2. Run idempotency check (is target already in desired state?)
 3. Capture pre-state for rollback reference
 
-### Execute
+---
+
+### Path A — Wazuh Fast Path
+
 Call the MCP action tool via curl (see Tool Reference).
 
-### Post-Execution
-1. Verify the action took effect using the verification tool
+**Post-execution:**
+1. Verify using the Wazuh verification tool
 2. If verification fails, retry once after 5 seconds
-3. Report result to the analyst
-4. Update case file
+3. Report result and update case file
+
+---
+
+### Path B — Custom Script Path
+
+1. Confirm scripts exist at `/workspace/group/scripts/CASE-{id}-{action}.sh`
+2. Execute the action script inside this container:
+   ```bash
+   bash /workspace/group/scripts/CASE-{id}-{action}.sh
+   ```
+3. Capture full output (stdout + stderr + exit code)
+4. Report output to analyst immediately
+5. Save approved script + output + rollback to audit log at `/workspace/group/scripts/CASE-{id}-audit.json`
+
+**If exit code ≠ 0:** stop, report failure, do not proceed to next action. Ask analyst whether to run rollback.
+
+**Delivery note:** script execution inside this container is the sandbox/verification step. If the action must run on a remote host, output the approved script and target metadata — delivery to the host is handled separately.
+
+---
 
 ### Confirmation Format
 ```
 ACTION EXECUTED — Case {case_id}
 
-Action: {action_type} — {target}
-Status: {success/failed}
-Verification: {passed/failed}
-Rollback available: {yes/no}
+Action:   {action_type} — {target}
+Path:     wazuh_ar | custom_script
+Status:   success | failed
+Exit code: {n}                        ← custom path only
+Verification: passed | failed         ← wazuh path only
+Rollback available: yes | no
 
 {Brief description of what was done and current state}
 ```
