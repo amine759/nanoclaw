@@ -19,7 +19,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
-const { ALERTS, AGENTS, PROCESSES } = require('./scenarios.js');
+const { ALERTS, AGENTS, PROCESSES, FIM, BACKDOOR_KEY } = require('./scenarios.js');
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_KEY = process.env.API_KEY ?? 'wazuh_test123456789012345678901234567890123';
@@ -125,6 +125,7 @@ const TOOLS = {
     anomalies: [
       { host: 'prod-web-01', description: '47 auth failures then successful login from same IP — classic brute force' },
       { host: 'prod-app-01', description: 'Hidden binary in /tmp beaconing to 198.51.100.22:4444' },
+      { host: 'prod-web-01', description: 'authorized_keys modified + .env.bak staged + outbound exfil to 203.0.113.77 — backdoor key + credential theft' },
     ],
   }),
 
@@ -149,6 +150,16 @@ const TOOLS = {
     if (!agent) return { error: 'Agent not found' };
     const procs = PROCESSES[agent.id] ?? [];
     return a.limit ? procs.slice(0, Number(a.limit)) : procs;
+  },
+
+  get_wazuh_syscheck: (a) => {
+    const agent = findAgent(a.agent_id);
+    if (!agent) return { error: 'Agent not found' };
+    const events = FIM[agent.id] ?? [];
+    const filtered = a.file_path
+      ? events.filter(e => e.path.includes(a.file_path))
+      : events;
+    return { agent_id: agent.id, total: filtered.length, events: filtered };
   },
 
   get_agent_ports: (a) => {
@@ -406,11 +417,12 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Mock Wazuh MCP Server listening on :${PORT}`);
   console.log(`API Key:  ${API_KEY}`);
   console.log(`Tools:    ${Object.keys(TOOLS).length}`);
-  console.log(`Alerts:   ${ALERTS.length} (${ALERTS.filter(a=>a.id.startsWith('alert-bf')).length} brute-force, ${ALERTS.filter(a=>a.id.startsWith('alert-mal')).length} malware, ${ALERTS.filter(a=>a.id.startsWith('alert-noise')).length} noise)`);
+  console.log(`Alerts:   ${ALERTS.length} (${ALERTS.filter(a=>a.id.startsWith('alert-bf')).length} brute-force, ${ALERTS.filter(a=>a.id.startsWith('alert-mal')).length} malware, ${ALERTS.filter(a=>a.id.startsWith('alert-noise')).length} noise, ${ALERTS.filter(a=>a.id.startsWith('alert-bkd')).length} backdoor)`);
   console.log(`Agents:   ${AGENTS.map(a => a.name).join(', ')}`);
   console.log('');
   console.log('Scenarios:');
-  console.log('  1. SSH Brute Force → Login → Lateral Movement (203.0.113.44 → prod-web-01 → prod-db-01)');
-  console.log('  2. Malware: hidden binary + cron persistence + C2 beacon (prod-app-01)');
-  console.log('  3. Low-noise routine alerts (dev-staging-01)');
+  console.log('  1. SSH Brute Force → Login → Lateral Movement (203.0.113.44 → prod-web-01 → prod-db-01)  [Wazuh AR path]');
+  console.log('  2. Malware: hidden binary + cron persistence + C2 beacon (prod-app-01)                   [Wazuh AR path]');
+  console.log('  3. Low-noise routine alerts (dev-staging-01)                                             [no action]');
+  console.log('  4. Backdoor SSH key + credential exfil (203.0.113.77 → prod-web-01)                     [mixed: Wazuh AR + custom script]');
 });
