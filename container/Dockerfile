@@ -1,5 +1,5 @@
 # NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# Runs OpenClaude (OpenAI-compatible Claude Code fork) in isolated Linux VM
 
 FROM node:22-slim
 
@@ -31,8 +31,14 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser globally
+RUN npm install -g agent-browser
+
+# OpenAI-compatible provider config (values injected at runtime via OneCLI / env)
+ENV CLAUDE_CODE_USE_OPENAI=1
+ENV OPENAI_API_KEY=""
+ENV OPENAI_BASE_URL=""
+ENV OPENAI_MODEL=""
 
 # Create app directory
 WORKDIR /app
@@ -45,6 +51,11 @@ RUN npm install
 
 # Copy source code
 COPY agent-runner/ ./
+
+# Copy vendored openclaude CLI and its external dependencies
+COPY vendor/openclaude-cli.mjs /app/vendor/openclaude-cli.mjs
+COPY vendor/package.json /app/vendor/package.json
+RUN cd /app/vendor && npm install --omit=dev
 
 # Build TypeScript
 RUN npm run build

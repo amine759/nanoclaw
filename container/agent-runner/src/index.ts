@@ -17,7 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query } from './openclaude-query.js';
 import { trace, SpanStatusCode, context, SpanKind, type Span } from '@opentelemetry/api';
 import { fileURLToPath } from 'url';
 
@@ -142,50 +142,6 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
   return null;
 }
 
-/**
- * Archive the full transcript to conversations/ before compaction.
- */
-function createPreCompactHook(assistantName?: string): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
-
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
-      return {};
-    }
-
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const messages = parseTranscript(content);
-
-      if (messages.length === 0) {
-        log('No messages to archive');
-        return {};
-      }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
-    } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    return {};
-  };
-}
 
 function sanitizeFilename(summary: string): string {
   return summary
@@ -422,14 +378,8 @@ async function runQuery(
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
           : undefined,
         allowedTools: [
-          'Bash',
-          'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'Task', 'TaskOutput', 'TaskStop',
-          'TeamCreate', 'TeamDelete', 'SendMessage',
-          'TodoWrite', 'ToolSearch', 'Skill',
-          'NotebookEdit',
-          'mcp__nanoclaw__*'
+          'mcp__nanoclaw__send_message',
+          'mcp__wazuh__*'
         ],
         env: sdkEnv,
         permissionMode: 'bypassPermissions',
@@ -445,9 +395,6 @@ async function runQuery(
               NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
             },
           },
-        },
-        hooks: {
-          PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
         },
       }
     }))) {
@@ -533,8 +480,8 @@ async function runQuery(
       // ─────────────────────────────────────────────────────────────────
 
       if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        rootSpan.setAttribute('session.id', newSessionId);
+        newSessionId = message.session_id as string | undefined;
+        rootSpan.setAttribute('session.id', newSessionId ?? '');
         log(`Session initialized: ${newSessionId}`);
       }
 

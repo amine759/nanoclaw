@@ -1,0 +1,25 @@
+{
+  "name": "openclaude-vendor-deps",
+  "version": "1.0.0",
+  "description": "External dependencies for the vendored openclaude CLI",
+  "private": true,
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.214.0",
+    "@opentelemetry/core": "^2.6.1",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.214.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
+    "@opentelemetry/resources": "^2.6.1",
+    "@opentelemetry/sdk-logs": "^0.214.0",
+    "@opentelemetry/sdk-metrics": "^2.6.1",
+    "@opentelemetry/sdk-trace-base": "^2.6.1",
+    "@opentelemetry/sdk-trace-node": "^2.6.1",
+    "@opentelemetry/semantic-conventions": "^1.40.0",
+    "@aws-sdk/client-bedrock": "^3.0.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "@aws-sdk/client-sts": "^3.0.0",
+    "@aws-sdk/credential-providers": "^3.0.0",
+    "@azure/identity": "^4.0.0",
+    "google-auth-library": "^9.15.0"
+  }
+}
