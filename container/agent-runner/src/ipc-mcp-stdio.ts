@@ -39,14 +39,34 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
+// Track consecutive send_message calls without any other tool in between.
+// Prevents the model from looping on status messages without doing real work.
+let consecutiveSendMessageCount = 0;
+const MAX_CONSECUTIVE_SEND_MESSAGES = 2;
+
+function resetSendMessageCounter() {
+  consecutiveSendMessageCount = 0;
+}
+
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates AFTER retrieving real data from a tool. Never call this repeatedly without calling another tool in between.",
   {
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
   },
   async (args) => {
+    consecutiveSendMessageCount++;
+    if (consecutiveSendMessageCount > MAX_CONSECUTIVE_SEND_MESSAGES) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Error: You have called send_message ${consecutiveSendMessageCount} times in a row without calling any other tool. You must call a data-fetching tool (e.g. mcp__wazuh__get_wazuh_alerts) to retrieve actual information before sending another message. Do not send status messages — retrieve the data now.`,
+        }],
+        isError: true,
+      };
+    }
+
     const data: Record<string, string | undefined> = {
       type: 'message',
       chatJid,
@@ -339,4 +359,25 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 
 // Start the stdio transport
 const transport = new StdioServerTransport();
+
+// Intercept tool calls to reset the send_message counter when any other tool runs.
+// This prevents the model from looping on status messages without doing real work.
+const originalOnMessage = transport.onmessage?.bind(transport);
+transport.onmessage = (message: Parameters<NonNullable<typeof transport.onmessage>>[0]) => {
+  if (
+    message &&
+    typeof message === 'object' &&
+    'method' in message &&
+    message.method === 'tools/call' &&
+    'params' in message &&
+    message.params &&
+    typeof message.params === 'object' &&
+    'name' in message.params &&
+    message.params.name !== 'send_message'
+  ) {
+    resetSendMessageCounter();
+  }
+  if (originalOnMessage) originalOnMessage(message);
+};
+
 await server.connect(transport);

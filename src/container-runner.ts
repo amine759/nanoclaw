@@ -165,6 +165,28 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount persisted .claude.json (stores MCP server config, trust state, etc.)
+  const claudeJsonFile = path.join(DATA_DIR, 'sessions', group.folder, '.claude.json');
+  if (!fs.existsSync(claudeJsonFile)) {
+    fs.writeFileSync(claudeJsonFile, JSON.stringify({
+      projects: {
+        '/workspace/group': {
+          hasTrustDialogAccepted: true,
+          mcpServers: {},
+          allowedTools: [],
+          mcpContextUris: [],
+          enabledMcpjsonServers: [],
+          disabledMcpjsonServers: [],
+        },
+      },
+    }, null, 2) + '\n');
+  }
+  mounts.push({
+    hostPath: claudeJsonFile,
+    containerPath: '/home/node/.claude.json',
+    readonly: false,
+  });
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);

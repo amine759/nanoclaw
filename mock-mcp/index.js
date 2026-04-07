@@ -47,8 +47,12 @@ function b64url(str) {
 
 function validAuth(req) {
   const h = req.headers['authorization'] ?? '';
-  // Accept any well-formed Bearer JWT
-  return h.startsWith('Bearer ') && h.split('.').length === 3;
+  if (!h.startsWith('Bearer ')) return false;
+  const token = h.slice(7);
+  // Accept raw API key
+  if (token === API_KEY) return true;
+  // Accept well-formed JWT
+  return token.split('.').length === 3;
 }
 
 // ─── Tool implementations ─────────────────────────────────────────────────────
